@@ -1,0 +1,22 @@
+# XAI Project Configuration
+# Russian Sentiment Analysis with LIME
+
+model:
+  name: "DeepPavlov/rubert-base-cased"
+  num_labels: 3
+  max_length: 256
+  batch_size: 16
+  epochs: 3
+  learning_rate: 2e-5
+
+data:
+  # Path to dataset (CSV with columns: text, label, src)
+  # Download from Kaggle: Russian Sentiment Analysis Dataset
+  train_path: "data/train.csv"
+  test_path: "data/test.csv"
+  label_names: ["negative", "neutral", "positive"]
+
+lime:
+  num_samples: 5000
+  num_features: 10
+  num_splits: 50

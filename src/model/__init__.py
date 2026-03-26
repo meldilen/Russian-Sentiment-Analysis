@@ -1,3 +1,3 @@
-from .rubert_classifier import RuBERTClassifier
+from .rubert_classifier import RuBERTClassifier, RuBERTPipeline
 
-__all__ = ["RuBERTClassifier"]
+__all__ = ["RuBERTClassifier", "RuBERTPipeline"]

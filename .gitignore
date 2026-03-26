@@ -1,0 +1,14 @@
+.venv
+.venv-win
+__pycache__
+results
+data
+checkpoints
+*.pt
+*.csv
+*.json
+*.html
+*.png
+*.jpg
+*.jpeg
+*.gif

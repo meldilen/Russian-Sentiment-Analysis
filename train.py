@@ -3,6 +3,7 @@ Training script for RuBERT 3-class sentiment classifier.
 """
 
 import argparse
+import gc
 import yaml
 from pathlib import Path
 
@@ -84,6 +85,8 @@ def train(config_path: str = "config.yaml"):
     )
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}")
+
     model = RuBERTClassifier(
         model_name=model_cfg["name"],
         num_labels=model_cfg["num_labels"],
@@ -92,7 +95,7 @@ def train(config_path: str = "config.yaml"):
     
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=model_cfg["learning_rate"],
+        lr=float(model_cfg["learning_rate"]),
     )
     
     total_steps = len(train_loader) * model_cfg["epochs"]
@@ -126,6 +129,7 @@ def train(config_path: str = "config.yaml"):
         
         avg_loss = total_loss / len(train_loader)
         print(f"Epoch {epoch+1} - Loss: {avg_loss:.4f}")
+        gc.collect()
     
     # Save model
     save_path = Path("checkpoints/rubert_sentiment.pt")

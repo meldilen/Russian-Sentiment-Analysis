@@ -4,16 +4,16 @@
 model:
   name: "DeepPavlov/rubert-base-cased"
   num_labels: 3
-  max_length: 256
+  max_length: 128
   batch_size: 8
-  epochs: 20
+  epochs: 5
   learning_rate: 2e-5
 
 data:
   # Download from Kaggle: https://www.kaggle.com/datasets/mar1mba/russian-sentiment-dataset
   train_path: "data/train.csv"
   test_path: "data/test.csv"
-  label_names: ["negative", "neutral", "positive"]
+  label_names: ["neutral", "positive", "negative"]
 
 # Vanilla LIME settings
 lime:

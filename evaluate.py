@@ -280,16 +280,26 @@ def main():
     )
 
     # Save results JSON
+    def _to_native(obj):
+        """Convert numpy types to Python native for JSON serialization."""
+        if isinstance(obj, dict):
+            return {k: _to_native(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [_to_native(v) for v in obj]
+        if hasattr(obj, "item"):
+            return obj.item()
+        return obj
+
     serializable_results = []
     for r in all_results:
         sr = {
             "text": r["text"],
             "prediction": r["prediction"],
-            "confidence": r["confidence"],
-            "vanilla_metrics": r["vanilla"]["metrics"],
-            "enhanced_metrics": r["enhanced"]["metrics"],
-            "vanilla_explanation": [(w, round(s, 6)) for w, s in r["vanilla"]["explanation"]],
-            "enhanced_explanation": [(w, round(s, 6)) for w, s in r["enhanced"]["explanation"]],
+            "confidence": float(r["confidence"]),
+            "vanilla_metrics": _to_native(r["vanilla"]["metrics"]),
+            "enhanced_metrics": _to_native(r["enhanced"]["metrics"]),
+            "vanilla_explanation": [(w, round(float(s), 6)) for w, s in r["vanilla"]["explanation"]],
+            "enhanced_explanation": [(w, round(float(s), 6)) for w, s in r["enhanced"]["explanation"]],
         }
         serializable_results.append(sr)
 

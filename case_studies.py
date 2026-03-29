@@ -185,17 +185,17 @@ def generate_case_study(
         "description": case["description"],
         "expected": case["expected"],
         "predicted": pred_label,
-        "confidence": pred_conf,
+        "confidence": float(pred_conf),
         "vanilla_metrics": {
-            "stability": v_stability, "faithfulness": v_faithfulness,
-            "sparsity": v_sparsity, "rank_correlation": v_rank_corr,
+            "stability": float(v_stability), "faithfulness": float(v_faithfulness),
+            "sparsity": float(v_sparsity), "rank_correlation": float(v_rank_corr),
         },
         "enhanced_metrics": {
-            "stability": e_stability, "faithfulness": e_faithfulness,
-            "sparsity": e_sparsity, "rank_correlation": e_rank_corr,
+            "stability": float(e_stability), "faithfulness": float(e_faithfulness),
+            "sparsity": float(e_sparsity), "rank_correlation": float(e_rank_corr),
         },
-        "vanilla_explanation": [(w, round(s, 6)) for w, s in vanilla_runs[0]],
-        "enhanced_explanation": [(w, round(s, 6)) for w, s in enhanced_detail["aggregated"]],
+        "vanilla_explanation": [(w, round(float(s), 6)) for w, s in vanilla_runs[0]],
+        "enhanced_explanation": [(w, round(float(s), 6)) for w, s in enhanced_detail["aggregated"]],
     }
 
 

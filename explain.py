@@ -26,8 +26,9 @@ def main():
         "--method", choices=["vanilla", "enhanced", "both"],
         default="both", help="Explanation method"
     )
-    parser.add_argument("--num-samples", type=int, default=None)
-    parser.add_argument("--num-features", type=int, default=None)
+    parser.add_argument("--num-samples", type=int, default=None, help="Override num_samples")
+    parser.add_argument("--num-features", type=int, default=None, help="Override num_features")
+    parser.add_argument("--n-runs", type=int, default=None, help="Override n_runs for enhanced")
     parser.add_argument("--save-plot", type=str, default=None, help="Save plot to file")
     parser.add_argument("--save-html", type=str, default=None, help="Save HTML explanation")
     args = parser.parse_args()
@@ -58,20 +59,27 @@ def main():
     text = args.text or "Фильм был отличный, очень понравилась игра актёров!"
     pred, probs = pipeline.predict([text], return_probs=True)
     pred_class = int(pred[0])
-    print(f"\nInput: {text}")
-    print(f"Prediction: {label_names[pred_class]} ({probs[0][pred_class]:.2%})")
+    pred_label = label_names[pred_class]
+    pred_conf = probs[0][pred_class]
+    
+    print(f"\n{'='*60}")
+    print(f"Input: {text}")
+    print(f"Prediction: {pred_label} ({pred_conf:.2%})")
+    print(f"{'='*60}")
 
     results = {}
+    vanilla_explainer = None  # store for HTML
+    enhanced_explainer = None  # store for HTML
 
     if args.method in ("vanilla", "both"):
         print("\n--- Vanilla LIME ---")
-        vanilla = LimeTextExplainer(
+        vanilla_explainer = LimeTextExplainer(
             predict_fn=predict_fn,
             num_samples=args.num_samples or lime_cfg.get("num_samples", 5000),
             num_features=args.num_features or lime_cfg.get("num_features", 10),
             kernel_width=lime_cfg.get("kernel_width", 25.0),
         )
-        exp_vanilla = vanilla.explain_instance(text, class_idx=pred_class)
+        exp_vanilla = vanilla_explainer.explain_instance(text, class_idx=pred_class)
         results["Vanilla LIME"] = exp_vanilla
 
         print("Word importance:")
@@ -80,7 +88,7 @@ def main():
 
     if args.method in ("enhanced", "both"):
         print("\n--- Stability-Enhanced LIME ---")
-        enhanced = StabilityEnhancedLIME(
+        enhanced_explainer = StabilityEnhancedLIME(
             predict_fn=predict_fn,
             num_samples=args.num_samples or enhanced_cfg.get("num_samples", 5000),
             num_features=args.num_features or enhanced_cfg.get("num_features", 10),
@@ -88,19 +96,22 @@ def main():
             phrase_max_len=enhanced_cfg.get("phrase_max_len", 3),
             adjacency_window=enhanced_cfg.get("adjacency_window", 2),
             mask_rate=enhanced_cfg.get("mask_rate", 0.4),
-            n_runs=enhanced_cfg.get("n_runs", 5),
+            propagation_prob=enhanced_cfg.get("propagation_prob", 0.3),
+            n_runs=args.n_runs or enhanced_cfg.get("n_runs", 5),
         )
-        detail = enhanced.explain_instance_detailed(text, class_idx=pred_class)
+        detail = enhanced_explainer.explain_instance_detailed(text, class_idx=pred_class)
         results["Enhanced LIME"] = detail["aggregated"]
 
         print("Word importance (aggregated):")
         for word, score in detail["aggregated"]:
             print(f"  {word}: {score:+.4f}")
 
-        print("\nPer-word stability (variance):")
-        for word, var in sorted(detail["stability"].items(), key=lambda x: x[1]):
-            print(f"  {word}: {var:.6f}")
+        if detail.get("stability"):
+            print("\nPer-word stability (variance, lower = more stable):")
+            for word, var in sorted(detail["stability"].items(), key=lambda x: x[1]):
+                print(f"  {word}: {var:.6f}")
 
+    # Save plot
     if args.save_plot and results:
         if len(results) == 1:
             name, exp = next(iter(results.items()))
@@ -113,21 +124,34 @@ def main():
             )
         print(f"\nPlot saved to {args.save_plot}")
 
+    # Save HTML - use stored explainers instead of creating new ones
     if args.save_html:
-        html_parts = ["<html><head><meta charset='utf-8'></head><body>"]
-        html_parts.append(f"<h2>Input: {text}</h2>")
-        html_parts.append(f"<h3>Prediction: {label_names[pred_class]} ({probs[0][pred_class]:.2%})</h3>")
-
-        if "Vanilla LIME" in results:
-            vanilla_exp = LimeTextExplainer(predict_fn=predict_fn, num_samples=100, num_features=10)
+        html_parts = [
+            "<html><head><meta charset='utf-8'>",
+            "<style>",
+            "body { font-family: Arial, sans-serif; margin: 20px; }",
+            ".explanation { margin: 20px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }",
+            ".word { display: inline-block; margin: 2px; padding: 2px 4px; border-radius: 3px; }",
+            ".positive { background-color: rgba(0, 200, 83, 0.4); }",
+            ".negative { background-color: rgba(244, 67, 54, 0.4); }",
+            "</style>",
+            "</head><body>",
+            f"<h1>Explanation for: {text}</h1>",
+            f"<h2>Prediction: {pred_label} ({pred_conf:.2%})</h2>",
+        ]
+        
+        if "Vanilla LIME" in results and vanilla_explainer:
+            html_parts.append("<div class='explanation'>")
             html_parts.append("<h3>Vanilla LIME</h3>")
-            html_parts.append(f"<p>{vanilla_exp.explain_instance_as_html(text, pred_class)}</p>")
-
-        if "Enhanced LIME" in results:
-            enhanced_exp = StabilityEnhancedLIME(predict_fn=predict_fn, num_samples=100, num_features=10, n_runs=2)
+            html_parts.append(f"<p>{vanilla_explainer.explain_instance_as_html(text, pred_class)}</p>")
+            html_parts.append("</div>")
+        
+        if "Enhanced LIME" in results and enhanced_explainer:
+            html_parts.append("<div class='explanation'>")
             html_parts.append("<h3>Stability-Enhanced LIME</h3>")
-            html_parts.append(f"<p>{enhanced_exp.explain_instance_as_html(text, pred_class)}</p>")
-
+            html_parts.append(f"<p>{enhanced_explainer.explain_instance_as_html(text, pred_class)}</p>")
+            html_parts.append("</div>")
+        
         html_parts.append("</body></html>")
         Path(args.save_html).write_text("\n".join(html_parts), encoding="utf-8")
         print(f"HTML saved to {args.save_html}")

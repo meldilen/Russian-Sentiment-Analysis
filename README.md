@@ -197,7 +197,7 @@ Key parameters to tune:
 ## References
 
 - Ribeiro et al. (2016) — [LIME: Local Interpretable Model-agnostic Explanations](https://arxiv.org/abs/1602.04938)
-- MINDFUL-LIME — Structure-aware perturbations for explanation stability
+- [MINDFUL-LIME](https://arxiv.org/abs/2503.20758) — Structure-aware perturbations for explanation stability
 - [ModernBERT-XAI](https://arxiv.org/abs/2503.20758) — Transformer interpretability
 - [Russian Sentiment Dataset](https://www.kaggle.com/datasets/mar1mba/russian-sentiment-dataset)
 

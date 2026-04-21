@@ -88,19 +88,22 @@ def generate_case_study(
     pred_conf = float(probs[pred_class])
     print(f"Predicted: {pred_label} ({pred_conf:.2%})")
 
-    # Vanilla LIME (5 runs for stability)
-    n_stability_runs = 5
+    # Number of stability runs
+    n_stability_runs = enhanced_cfg.get("n_runs", 5)
+    
+    # Vanilla LIME (multiple runs for stability)
+    base_explainer = LimeTextExplainer(
+        predict_fn=predict_fn,
+        num_samples=lime_cfg.get("num_samples", 5000),
+        num_features=lime_cfg.get("num_features", 10),
+        kernel_width=lime_cfg.get("kernel_width", 25.0),
+        random_state=0,
+    )
+    
     vanilla_runs = []
     for i in range(n_stability_runs):
-        exp = LimeTextExplainer(
-            predict_fn=predict_fn,
-            num_samples=lime_cfg.get("num_samples", 5000),
-            num_features=lime_cfg.get("num_features", 10),
-            kernel_width=lime_cfg.get("kernel_width", 25.0),
-            random_state=i * 17,
-        )
-        vanilla_runs.append(exp.explain_instance(text, class_idx=pred_class))
-
+        base_explainer.rng = np.random.default_rng(i * 17)
+        vanilla_runs.append(base_explainer.explain_instance(text, class_idx=pred_class))
     # Enhanced LIME
     enhanced = StabilityEnhancedLIME(
         predict_fn=predict_fn,
@@ -110,6 +113,7 @@ def generate_case_study(
         phrase_max_len=enhanced_cfg.get("phrase_max_len", 3),
         adjacency_window=enhanced_cfg.get("adjacency_window", 2),
         mask_rate=enhanced_cfg.get("mask_rate", 0.4),
+        propagation_prob=enhanced_cfg.get("propagation_prob", 0.3),
         n_runs=enhanced_cfg.get("n_runs", 5),
     )
     enhanced_detail = enhanced.explain_instance_detailed(text, class_idx=pred_class)
@@ -221,7 +225,6 @@ def _generate_html_report(
         return " ".join(parts)
 
     probs_str = ", ".join(f"{label_names[i]}: {probs[i]:.2%}" for i in range(len(label_names)))
-
     html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <style>
@@ -235,6 +238,7 @@ th, td {{ padding: 10px 15px; text-align: left; border-bottom: 1px solid #ddd; }
 th {{ background: #e8eaf6; font-weight: 600; }}
 .better {{ color: #2e7d32; font-weight: bold; }}
 img {{ max-width: 100%; margin: 10px 0; border: 1px solid #eee; border-radius: 8px; }}
+.badge {{ margin-left: 15px; }}
 </style>
 </head><body>
 <h1>Case Study {idx}: {case['description']}</h1>
@@ -262,7 +266,7 @@ img {{ max-width: 100%; margin: 10px 0; border: 1px solid #eee; border-radius: 8
         winner = "Enhanced" if e > v else ("Vanilla" if v > e else "Tie")
         v_cls = ' class="better"' if v > e else ""
         e_cls = ' class="better"' if e > v else ""
-        html += f"\n<tr><td>{metric_name.replace('_', ' ').title()}</td>"
+        html += f"\n<tr>\n<td>{metric_name.replace('_', ' ').title()}</td>"
         html += f"<td{v_cls}>{v:.4f}</td><td{e_cls}>{e:.4f}</td><td>{winner}</td></tr>"
 
     html += """

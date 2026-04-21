@@ -11,8 +11,8 @@ model:
 
 data:
   # Download from Kaggle: https://www.kaggle.com/datasets/mar1mba/russian-sentiment-dataset
-  train_path: "data/train.csv"
-  test_path: "data/test.csv"
+  train_path: "data/sentiment_dataset.csv"
+  test_path: null
   label_names: ["neutral", "positive", "negative"]
 
 # Vanilla LIME settings
@@ -29,6 +29,7 @@ enhanced_lime:
   phrase_max_len: 3
   adjacency_window: 2
   mask_rate: 0.4
+  propagation_prob: 0.3
   n_runs: 5
 
 # Evaluation

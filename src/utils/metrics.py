@@ -71,7 +71,12 @@ def compute_faithfulness(
     orig_conf = orig_probs[pred_class]
 
     perturbed_tokens = [t for t in tokens if t not in top_words]
-    perturbed_text = " ".join(perturbed_tokens).strip() or " "
+
+    # Handle empty text case
+    if not perturbed_tokens:
+        perturbed_text = "empty text"  # placeholder for empty text
+    else:
+        perturbed_text = " ".join(perturbed_tokens).strip()
 
     new_probs = predict_fn([perturbed_text])[0]
     new_conf = new_probs[pred_class]
@@ -79,6 +84,32 @@ def compute_faithfulness(
     drop = orig_conf - new_conf
     return max(0.0, min(1.0, drop))
 
+def compute_faithfulness_aggregated(
+    text: str,
+    tokenizer: Callable[[str], List[str]],
+    predict_fn: Callable[[List[str]], np.ndarray],
+    explanations: List[List[Tuple[str, float]]],
+    top_k: int = 5,
+    aggregation: str = "median",  # 'mean' or 'median'
+) -> float:
+    """
+    Compute faithfulness aggregated across multiple explanation runs.
+    
+    This gives a more stable estimate of faithfulness compared to using
+    a single run.
+    """
+    if not explanations:
+        return 0.0
+    
+    faithfulness_scores = []
+    for exp in explanations:
+        score = compute_faithfulness(text, tokenizer, predict_fn, exp, top_k)
+        faithfulness_scores.append(score)
+    
+    if aggregation == "median":
+        return float(np.median(faithfulness_scores))
+    else:
+        return float(np.mean(faithfulness_scores))
 
 def compute_sparsity(
     explanation: List[Tuple[str, float]],
@@ -104,6 +135,22 @@ def compute_sparsity(
     index = np.arange(1, n + 1)
     return float(((2 * index - n - 1) * scores).sum() / (n * scores.sum()))
 
+def compute_sparsity_aggregated(
+    explanations: List[List[Tuple[str, float]]],
+    aggregation: str = "median",
+) -> float:
+    """
+    Compute sparsity aggregated across multiple explanation runs.
+    """
+    if not explanations:
+        return 0.0
+    
+    sparsity_scores = [compute_sparsity(exp) for exp in explanations]
+    
+    if aggregation == "median":
+        return float(np.median(sparsity_scores))
+    else:
+        return float(np.mean(sparsity_scores))
 
 def compute_rank_correlation(
     explanations: List[List[Tuple[str, float]]],
@@ -112,6 +159,7 @@ def compute_rank_correlation(
     Compute average pairwise Spearman rank correlation of word rankings
     across multiple explanation runs.
 
+    Uses Spearman's rank correlation with proper handling of ties.
     High correlation = consistent feature ranking = more stable.
 
     Returns:
@@ -136,18 +184,43 @@ def compute_rank_correlation(
         score_vec = np.zeros(n_words)
         for w, s in exp:
             score_vec[word_to_idx[w]] = abs(s)
-        ranks = np.zeros(n_words)
-        order = np.argsort(-score_vec)
-        for rank, idx in enumerate(order):
-            ranks[idx] = rank
+        # Use scipy if available, otherwise implement tie-aware ranking
+        try:
+            from scipy.stats import rankdata
+            ranks = rankdata(-score_vec, method='average')  # negative for descending
+        except ImportError:
+            # Manual ranking with ties
+            order = np.argsort(-score_vec)
+            ranks = np.zeros(n_words)
+            current_rank = 1
+            i = 0
+            while i < n_words:
+                # Find all indices with same score
+                j = i
+                while j + 1 < n_words and score_vec[order[j]] == score_vec[order[j + 1]]:
+                    j += 1
+                # Assign average rank
+                avg_rank = (current_rank + current_rank + (j - i)) / 2
+                for k in range(i, j + 1):
+                    ranks[order[k]] = avg_rank
+                current_rank += (j - i + 1)
+                i = j + 1
+        
         rank_matrices.append(ranks)
 
     correlations = []
     for i in range(len(rank_matrices)):
         for j in range(i + 1, len(rank_matrices)):
             r1, r2 = rank_matrices[i], rank_matrices[j]
-            d = r1 - r2
-            rho = 1 - (6 * np.sum(d ** 2)) / (n_words * (n_words ** 2 - 1))
+            # Spearman correlation = Pearson correlation on ranks
+            r1_centered = r1 - np.mean(r1)
+            r2_centered = r2 - np.mean(r2)
+            numerator = np.sum(r1_centered * r2_centered)
+            denominator = np.sqrt(np.sum(r1_centered ** 2) * np.sum(r2_centered ** 2))
+            if denominator > 0:
+                rho = numerator / denominator
+            else:
+                rho = 0.0
             correlations.append(rho)
 
     return float(np.mean(correlations)) if correlations else 1.0
@@ -184,7 +257,11 @@ def compute_incremental_faithfulness(
             removed.add(sorted_exp[k - 1][0])
 
         remaining = [t for t in tokens if t not in removed]
-        perturbed = " ".join(remaining).strip() or " "
+        if not remaining:
+            perturbed = "empty text"
+        else:
+            perturbed = " ".join(remaining).strip()
+        
         new_probs = predict_fn([perturbed])[0]
         drop = orig_conf - new_probs[pred_class]
         results.append((k, max(0.0, min(1.0, drop))))
@@ -198,6 +275,7 @@ def compute_all_metrics(
     predict_fn: Callable[[List[str]], np.ndarray],
     explanations: List[List[Tuple[str, float]]],
     top_k: int = 5,
+    aggregate_over_runs: bool = True,  # if True, aggregate faithfulness/sparsity over runs
 ) -> Dict[str, float]:
     """
     Compute all evaluation metrics at once.
@@ -208,16 +286,25 @@ def compute_all_metrics(
         predict_fn: Prediction function
         explanations: List of explanations from multiple runs
         top_k: Number of top features for faithfulness
+        aggregate_over_runs: If True, average faithfulness/sparsity across runs.
+                            If False, use only first run (faster but less stable).
 
     Returns:
         Dict with stability, faithfulness, sparsity, rank_correlation
     """
     stability = compute_stability_score(explanations)
-    faithfulness = compute_faithfulness(
-        text, tokenizer, predict_fn, explanations[0], top_k
-    ) if explanations else 0.0
-    sparsity = compute_sparsity(explanations[0]) if explanations else 0.0
     rank_corr = compute_rank_correlation(explanations)
+    
+    if aggregate_over_runs and len(explanations) > 1:
+        faithfulness = compute_faithfulness_aggregated(
+            text, tokenizer, predict_fn, explanations, top_k, aggregation="mean"
+        )
+        sparsity = compute_sparsity_aggregated(explanations, aggregation="mean")
+    else:
+        faithfulness = compute_faithfulness(
+            text, tokenizer, predict_fn, explanations[0], top_k
+        ) if explanations else 0.0
+        sparsity = compute_sparsity(explanations[0]) if explanations else 0.0
 
     return {
         "stability": stability,
@@ -225,3 +312,4 @@ def compute_all_metrics(
         "sparsity": sparsity,
         "rank_correlation": rank_corr,
     }
+

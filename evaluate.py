@@ -52,16 +52,19 @@ def run_vanilla_lime_multiple(
 ) -> List[List[Tuple[str, float]]]:
     """Run vanilla LIME multiple times for stability analysis."""
     results = []
-    for i in range(n_runs):
-        explainer = LimeTextExplainer(
+    base_explainer = LimeTextExplainer(
             predict_fn=predict_fn,
             num_samples=num_samples,
             num_features=num_features,
             kernel_width=kernel_width,
-            random_state=i * 42,
+            random_state=0,
         )
-        exp = explainer.explain_instance(text, class_idx=class_idx)
+    for i in range(n_runs):
+        # Override random state for each run
+        base_explainer.rng = np.random.default_rng(i * 42)
+        exp = base_explainer.explain_instance(text, class_idx=class_idx)
         results.append(exp)
+
     return results
 
 
@@ -80,6 +83,7 @@ def run_enhanced_lime_detailed(
         phrase_max_len=enhanced_cfg.get("phrase_max_len", 3),
         adjacency_window=enhanced_cfg.get("adjacency_window", 2),
         mask_rate=enhanced_cfg.get("mask_rate", 0.4),
+        propagation_prob=enhanced_cfg.get("propagation_prob", 0.3),
         n_runs=enhanced_cfg.get("n_runs", 5),
     )
     return explainer.explain_instance_detailed(text, class_idx=class_idx)
@@ -119,7 +123,12 @@ def evaluate_text(
 
     # Enhanced LIME
     print("  Running Enhanced LIME...")
-    enhanced_detail = run_enhanced_lime_detailed(predict_fn, text, pred_class, enhanced_cfg)
+    enhanced_detail = run_enhanced_lime_detailed(predict_fn, text, pred_class, enhanced_cfg, get_attention_fn)
+
+    # Check if per_run exists
+    if not enhanced_detail.get("per_run"):
+        print("    Warning: Enhanced LIME returned no runs, using empty list")
+        enhanced_detail["per_run"] = []
 
     enhanced_metrics = compute_all_metrics(
         text, _tokenize_russian, predict_fn, enhanced_detail["per_run"], top_k=faithfulness_top_k
@@ -130,7 +139,7 @@ def evaluate_text(
         text, _tokenize_russian, predict_fn, vanilla_runs[0]
     )
     enhanced_deletion = compute_incremental_faithfulness(
-        text, _tokenize_russian, predict_fn, enhanced_detail["aggregated"]
+        text, _tokenize_russian, predict_fn, enhanced_detail.get("aggregated", [])
     )
 
     return {
@@ -144,11 +153,11 @@ def evaluate_text(
             "deletion_curve": vanilla_deletion,
         },
         "enhanced": {
-            "explanation": enhanced_detail["aggregated"],
-            "all_runs": enhanced_detail["per_run"],
+            "explanation": enhanced_detail.get("aggregated", []),
+            "all_runs": enhanced_detail.get("per_run", []),
             "metrics": enhanced_metrics,
             "deletion_curve": enhanced_deletion,
-            "per_word_stability": enhanced_detail["stability"],
+            "per_word_stability": enhanced_detail.get("stability", {}),
         },
     }
 
@@ -217,35 +226,49 @@ def main():
         all_vanilla_metrics.append(result["vanilla"]["metrics"])
         all_enhanced_metrics.append(result["enhanced"]["metrics"])
 
-        # Per-text visualizations
-        plot_explanation_comparison(
-            [result["vanilla"]["explanation"], result["enhanced"]["explanation"]],
-            ["Vanilla LIME", "Enhanced LIME"],
-            title=f"Case {idx+1}: {text[:50]}...",
-            save_path=str(output_dir / f"case_{idx+1}_comparison.png"),
-        )
-
-        plot_stability_heatmap(
-            result["vanilla"]["all_runs"][:5],
-            title=f"Case {idx+1}: Vanilla LIME Stability",
-            save_path=str(output_dir / f"case_{idx+1}_vanilla_stability.png"),
-        )
-
-        plot_stability_heatmap(
-            result["enhanced"]["all_runs"],
-            title=f"Case {idx+1}: Enhanced LIME Stability",
-            save_path=str(output_dir / f"case_{idx+1}_enhanced_stability.png"),
-        )
-
-        if result["vanilla"]["deletion_curve"] and result["enhanced"]["deletion_curve"]:
-            plot_deletion_curve(
-                {
-                    "Vanilla LIME": result["vanilla"]["deletion_curve"],
-                    "Enhanced LIME": result["enhanced"]["deletion_curve"],
-                },
-                title=f"Case {idx+1}: Deletion Curve",
-                save_path=str(output_dir / f"case_{idx+1}_deletion.png"),
+        # Per-text visualizations (with safety checks)
+        try:
+            plot_explanation_comparison(
+                [result["vanilla"]["explanation"], result["enhanced"]["explanation"]],
+                ["Vanilla LIME", "Enhanced LIME"],
+                title=f"Case {idx+1}: {text[:50]}...",
+                save_path=str(output_dir / f"case_{idx+1}_comparison.png"),
             )
+        except Exception as e:
+            print(f"    Warning: Could not plot comparison: {e}")
+
+        try:
+            if result["vanilla"]["all_runs"]:
+                plot_stability_heatmap(
+                    result["vanilla"]["all_runs"][:5],
+                    title=f"Case {idx+1}: Vanilla LIME Stability",
+                    save_path=str(output_dir / f"case_{idx+1}_vanilla_stability.png"),
+                )
+        except Exception as e:
+            print(f"    Warning: Could not plot vanilla stability: {e}")
+
+        try:
+            if result["enhanced"]["all_runs"]:
+                plot_stability_heatmap(
+                    result["enhanced"]["all_runs"],
+                    title=f"Case {idx+1}: Enhanced LIME Stability",
+                    save_path=str(output_dir / f"case_{idx+1}_enhanced_stability.png"),
+                )
+        except Exception as e:
+            print(f"    Warning: Could not plot enhanced stability: {e}")
+
+        try:
+            if result["vanilla"]["deletion_curve"] and result["enhanced"]["deletion_curve"]:
+                plot_deletion_curve(
+                    {
+                        "Vanilla LIME": result["vanilla"]["deletion_curve"],
+                        "Enhanced LIME": result["enhanced"]["deletion_curve"],
+                    },
+                    title=f"Case {idx+1}: Deletion Curve",
+                    save_path=str(output_dir / f"case_{idx+1}_deletion.png"),
+                )
+        except Exception as e:
+            print(f"    Warning: Could not plot deletion curve: {e}")
 
     # Aggregate metrics
     print(f"\n{'='*60}")
@@ -255,8 +278,8 @@ def main():
     avg_vanilla = {}
     avg_enhanced = {}
     for key in ["stability", "faithfulness", "sparsity", "rank_correlation"]:
-        avg_vanilla[key] = float(np.mean([m[key] for m in all_vanilla_metrics]))
-        avg_enhanced[key] = float(np.mean([m[key] for m in all_enhanced_metrics]))
+        avg_vanilla[key] = float(np.mean([m.get(key, 0) for m in all_vanilla_metrics]))
+        avg_enhanced[key] = float(np.mean([m.get(key, 0) for m in all_enhanced_metrics]))
 
     print("\nVanilla LIME (average):")
     for k, v in avg_vanilla.items():
@@ -274,10 +297,13 @@ def main():
         print(f"  Improvement in {key}: {sign}{diff:.4f}")
 
     # Summary visualization
-    plot_metrics_comparison(
-        {"Vanilla LIME": avg_vanilla, "Enhanced LIME": avg_enhanced},
-        save_path=str(output_dir / "metrics_comparison.png"),
-    )
+    try:
+        plot_metrics_comparison(
+            {"Vanilla LIME": avg_vanilla, "Enhanced LIME": avg_enhanced},
+            save_path=str(output_dir / "metrics_comparison.png"),
+        )
+    except Exception as e:
+        print(f"Warning: Could not plot metrics comparison: {e}")
 
     # Save results JSON
     def _to_native(obj):
@@ -304,6 +330,11 @@ def main():
         serializable_results.append(sr)
 
     summary = {
+        "config": {
+            "propagation_prob": enhanced_cfg.get("propagation_prob", 0.3),
+            "mask_rate": enhanced_cfg.get("mask_rate", 0.4),
+            "n_runs": enhanced_cfg.get("n_runs", 5),
+        },
         "aggregate": {
             "vanilla_lime": avg_vanilla,
             "enhanced_lime": avg_enhanced,
@@ -321,3 +352,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    

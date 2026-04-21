@@ -10,10 +10,12 @@ from typing import Tuple, Optional, List
 
 
 def load_dataset(
-    train_path: str = "data/train.csv",
-    test_path: Optional[str] = "data/test.csv",
+    train_path: str = "data/sentiment_dataset.csv",
+    test_path: Optional[str] = None,
     text_column: str = "text",
     label_column: str = "label",
+    val_split: float = 0.2,
+    random_state: int = 42,
 ) -> Tuple[pd.DataFrame, Optional[pd.DataFrame]]:
     """
     Load Russian sentiment dataset from CSV files.
@@ -22,13 +24,15 @@ def load_dataset(
     Labels: 0 (negative), 1 (neutral), 2 (positive)
     
     Args:
-        train_path: Path to training CSV
-        test_path: Path to test CSV (optional)
+        train_path: Path to CSV file (or single dataset file)
+        test_path: Path to test CSV (optional, if None, split train data)
         text_column: Name of text column
         label_column: Name of label column
+        val_split: Fraction of data to use for validation (if test_path is None)
+        random_state: Random seed for reproducibility
         
     Returns:
-        Tuple of (train_df, test_df or None)
+        Tuple of (train_df, val_df or None)
     """
     train_path = Path(train_path)
     if not train_path.exists():
@@ -38,20 +42,20 @@ def load_dataset(
             "and place it in the data/ directory."
         )
     
-    train_df = pd.read_csv(train_path)
+    df = pd.read_csv(train_path)
     
     # Validate required columns
-    if text_column not in train_df.columns:
-        raise ValueError(f"Text column '{text_column}' not found. Available: {list(train_df.columns)}")
-    if label_column not in train_df.columns:
-        raise ValueError(f"Label column '{label_column}' not found. Available: {list(train_df.columns)}")
+    if text_column not in df.columns:
+        raise ValueError(f"Text column '{text_column}' not found. Available: {list(df.columns)}")
+    if label_column not in df.columns:
+        raise ValueError(f"Label column '{label_column}' not found. Available: {list(df.columns)}")
     
     # Ensure labels are numeric (0, 1, 2)
-    train_df[label_column] = pd.to_numeric(train_df[label_column], errors="coerce")
-    train_df = train_df.dropna(subset=[label_column])
-    train_df[label_column] = train_df[label_column].astype(int)
+    df[label_column] = pd.to_numeric(df[label_column], errors="coerce")
+    df = df.dropna(subset=[label_column])
+    df[label_column] = df[label_column].astype(int)
     
-    test_df = None
+    # If test_path is provided, use it as validation set
     if test_path:
         test_path = Path(test_path)
         if test_path.exists():
@@ -62,15 +66,68 @@ def load_dataset(
                 test_df[label_column] = test_df[label_column].astype(int)
             else:
                 test_df = None
+        else:
+            test_df = None
+        return df, test_df
     
-    return train_df, test_df
+    # Otherwise, split the single dataset into train/val
+    print(f"Total samples: {len(df)}")
+    print(f"Splitting into train/val with val_split={val_split}")
+    
+    from sklearn.model_selection import train_test_split
+    
+    train_df, val_df = train_test_split(
+        df,
+        test_size=val_split,
+        random_state=random_state,
+        stratify=df[label_column],  # maintain class balance
+    )
+    
+    print(f"Train size: {len(train_df)} ({len(train_df)/len(df)*100:.1f}%)")
+    print(f"Val size: {len(val_df)} ({len(val_df)/len(df)*100:.1f}%)")
+    
+    # Print class distribution
+    print("\nTrain class distribution:")
+    print(train_df[label_column].value_counts().sort_index().to_dict())
+    print("Val class distribution:")
+    print(val_df[label_column].value_counts().sort_index().to_dict())
+    
+    return train_df, val_df
+
+
+def remove_duplicates(
+    df: pd.DataFrame,
+    text_column: str = "text",
+    label_column: str = "label",
+    keep: str = "first",
+) -> pd.DataFrame:
+    """
+    Remove duplicate texts from the dataset.
+    
+    Args:
+        df: Input DataFrame
+        text_column: Name of text column
+        label_column: Name of label column
+        keep: Which duplicates to keep ('first', 'last', or False)
+        
+    Returns:
+        DataFrame with duplicates removed
+    """
+    original_len = len(df)
+    df_cleaned = df.drop_duplicates(subset=[text_column], keep=keep)
+    removed_count = original_len - len(df_cleaned)
+    
+    if removed_count > 0:
+        print(f"Removed {removed_count} duplicate texts ({removed_count/original_len*100:.1f}% of data)")
+    
+    return df_cleaned
 
 
 def preprocess_dataset(
     df: pd.DataFrame,
     text_column: str = "text",
     label_column: str = "label",
-    max_length: Optional[int] = None,
+    remove_duplicate_texts: bool = True,
 ) -> Tuple[List[str], np.ndarray]:
     """
     Preprocess dataset for model input.
@@ -79,11 +136,18 @@ def preprocess_dataset(
         df: Input DataFrame
         text_column: Name of text column
         label_column: Name of label column
-        max_length: Optional max text length (truncation)
+        remove_duplicate_texts: Whether to remove duplicate texts
         
     Returns:
         Tuple of (texts, labels)
     """
+    # Make a copy to avoid modifying original
+    df = df.copy()
+    
+    # Remove duplicates if requested
+    if remove_duplicate_texts:
+        df = remove_duplicates(df, text_column, label_column)
+    
     texts = df[text_column].astype(str).tolist()
     labels = df[label_column].values
     
@@ -95,7 +159,9 @@ def preprocess_dataset(
     texts = [texts[i] for i in valid_indices]
     labels = labels[valid_indices]
     
-    if max_length:
-        texts = [t[:max_length] if len(t) > max_length else t for t in texts]
+    # Print statistics
+    print(f"Final dataset size: {len(texts)} samples")
+    unique_labels, counts = np.unique(labels, return_counts=True)
+    print(f"Class distribution: {dict(zip(unique_labels, counts))}")
     
     return texts, labels

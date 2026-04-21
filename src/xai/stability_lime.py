@@ -16,7 +16,6 @@ Reference:
 import numpy as np
 from typing import Callable, List, Optional, Tuple, Dict
 from collections import defaultdict
-import re
 
 from .lime_text import _tokenize_russian
 
@@ -72,6 +71,7 @@ class StabilityEnhancedLIME:
         phrase_max_len: int = 3,
         adjacency_window: int = 2,
         mask_rate: float = 0.4,
+        propagation_prob: float = 0.3,
         n_runs: int = 5,
         random_state: Optional[int] = None,
     ):
@@ -85,6 +85,7 @@ class StabilityEnhancedLIME:
             phrase_max_len: Max contiguous token span for phrase-level groups
             adjacency_window: Window size for the adjacency graph
             mask_rate: Target fraction of tokens to mask per perturbation
+            propagation_prob: Probability of masking a neighbor (lower = more conservative)
             n_runs: Number of aggregated runs for stability
             random_state: Seed for reproducibility
         """
@@ -96,6 +97,7 @@ class StabilityEnhancedLIME:
         self.phrase_max_len = phrase_max_len
         self.adjacency_window = adjacency_window
         self.mask_rate = mask_rate
+        self.propagation_prob = propagation_prob
         self.n_runs = n_runs
         self.rng = np.random.default_rng(random_state)
 
@@ -110,24 +112,26 @@ class StabilityEnhancedLIME:
         Instead of flipping each token independently (vanilla LIME),
         we select seed tokens and propagate masking to neighbors
         with controlled probability, producing coherent perturbations.
+
+        Propagation_prob controls neighbor masking separately from mask_rate.
         """
         n = len(tokens)
         masks = np.ones((self.num_samples, n), dtype=np.int32)
         masks[0] = 1  # first sample is always unperturbed
 
         for i in range(1, self.num_samples):
-            n_seeds = max(1, int(n * self.mask_rate * 0.5))
+            n_seeds = max(1, int(n * self.mask_rate))
             seeds = self.rng.choice(n, size=min(n_seeds, n), replace=False)
 
             for seed in seeds:
                 masks[i, seed] = 0
                 neighbors = graph.get(seed, [])
                 for nb in neighbors:
-                    if self.rng.random() < self.mask_rate:
+                    if self.rng.random() < self.propagation_prob:
                         masks[i, nb] = 0
 
         return masks
-
+    
     def _phrase_level_masks(
         self,
         tokens: List[str],
@@ -172,7 +176,6 @@ class StabilityEnhancedLIME:
         n = len(tokens)
         half = self.num_samples // 2
 
-        saved_state = self.rng.bit_generator.state
         graph_masks = self._structure_aware_masks(tokens, graph)[:half]
         phrase_masks = self._phrase_level_masks(tokens, groups)[: self.num_samples - half]
         masks = np.vstack([graph_masks, phrase_masks])
@@ -206,10 +209,10 @@ class StabilityEnhancedLIME:
         """
         Explain a prediction with stability-enhanced LIME.
 
-        Aggregates multiple runs and returns the mean importance per word.
+        Aggregates multiple runs and returns the median importance per word.
 
         Returns:
-            List of (word, mean_importance) sorted by absolute importance.
+            List of (word, median_importance) sorted by absolute importance.
         """
         tokens = self.tokenizer(text)
         if not tokens:
@@ -221,12 +224,10 @@ class StabilityEnhancedLIME:
 
         graph = _build_adjacency_graph(tokens, self.adjacency_window)
         groups = _extract_phrase_groups(tokens, self.phrase_max_len)
-
         all_runs: List[List[Tuple[str, float]]] = []
         for _ in range(self.n_runs):
             run = self._single_run(text, tokens, class_idx, graph, groups)
             all_runs.append(run)
-
         aggregated = self._aggregate_runs(all_runs, tokens)
         return aggregated
 
@@ -260,7 +261,6 @@ class StabilityEnhancedLIME:
         for _ in range(self.n_runs):
             run = self._single_run(text, tokens, class_idx, graph, groups)
             all_runs.append(run)
-
         aggregated = self._aggregate_runs(all_runs, tokens)
 
         word_scores_map: Dict[str, List[float]] = defaultdict(list)
@@ -285,7 +285,7 @@ class StabilityEnhancedLIME:
         all_runs: List[List[Tuple[str, float]]],
         tokens: List[str],
     ) -> List[Tuple[str, float]]:
-        """Aggregate multiple runs by computing mean importance per word."""
+        """Aggregate multiple runs by computing median importance per word."""
         word_scores: Dict[str, List[float]] = defaultdict(list)
         for run in all_runs:
             for w, s in run:
@@ -294,8 +294,8 @@ class StabilityEnhancedLIME:
         aggregated = []
         for word in tokens:
             if word in word_scores:
-                mean_score = float(np.mean(word_scores[word]))
-                aggregated.append((word, mean_score))
+                median_score = float(np.median(word_scores[word]))
+                aggregated.append((word, median_score))
 
         seen = set()
         deduped = []

@@ -4,7 +4,8 @@ Explains individual predictions by approximating the model locally with a sparse
 """
 
 import numpy as np
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple, Dict
+from collections import defaultdict
 import re
 
 
@@ -148,11 +149,10 @@ class LimeTextExplainer:
         weights = self._kernel(distances.astype(float))
         
         # Fit weighted linear regression: minimize L = Σ π_x(z) * (f(z) - g(z))^2
-        # Using iterative weighted least squares with L1 regularization (sparsity)
         from sklearn.linear_model import Ridge
         
-        # Ridge with high regularization for sparsity; we'll also do feature selection
-        model = Ridge(alpha=1.0, random_state=self.rng.integers(0, 2**31))
+        # Ridge with high regularization for sparsity
+        model = Ridge(alpha=1.0)
         model.fit(data, y, sample_weight=weights)
         
         coefficients = model.coef_
@@ -169,6 +169,125 @@ class LimeTextExplainer:
         # Return top features
         return word_scores[: self.num_features]
     
+    def explain_instance_multiple_runs(
+        self,
+        text: str,
+        class_idx: Optional[int] = None,
+        n_runs: int = 5,
+        aggregation: str = "median",  # 'mean' or 'median'
+    ) -> List[Tuple[str, float]]:
+        """
+        Run LIME multiple times and aggregate results for stability.
+        
+        Args:
+            text: Input text to explain
+            class_idx: Class to explain
+            n_runs: Number of runs
+            aggregation: 'mean' or 'median'
+            
+        Returns:
+            Aggregated list of (word, importance_score)
+        """
+        tokens = self.tokenizer(text)
+        if not tokens:
+            return []
+        
+        all_runs = []
+        for i in range(n_runs):
+            # Save and restore RNG state to ensure independence
+            saved_state = self.rng.bit_generator.state
+            exp = self.explain_instance(text, class_idx)
+            all_runs.append(exp)
+            self.rng.bit_generator.state = saved_state
+            # Advance RNG for next run
+            self.rng.random()
+        
+        return self._aggregate_runs(all_runs, tokens, aggregation)
+    
+    def explain_instance_detailed(
+        self,
+        text: str,
+        class_idx: Optional[int] = None,
+        n_runs: int = 5,
+    ) -> Dict:
+        """
+        Return detailed explanation with per-run data for analysis.
+        
+        Returns dict with:
+            - aggregated: final (word, score) list
+            - per_run: list of per-run explanations
+            - tokens: input tokens
+            - class_idx: explained class
+            - stability: per-word variance dict
+        """
+        tokens = self.tokenizer(text)
+        if not tokens:
+            return {"aggregated": [], "per_run": [], "tokens": tokens, "class_idx": None, "stability": {}}
+        
+        orig_probs = self.predict_fn([text])[0]
+        if class_idx is None:
+            class_idx = int(np.argmax(orig_probs))
+        
+        all_runs = []
+        for i in range(n_runs):
+            saved_state = self.rng.bit_generator.state
+            exp = self.explain_instance(text, class_idx)
+            all_runs.append(exp)
+            self.rng.bit_generator.state = saved_state
+            self.rng.random()
+        
+        aggregated = self._aggregate_runs(all_runs, tokens, aggregation="median")
+        
+        # Calculate per-word variance for stability
+        word_scores_map: Dict[str, List[float]] = defaultdict(list)
+        for run in all_runs:
+            for w, s in run:
+                word_scores_map[w].append(s)
+        
+        stability = {}
+        for w, scores in word_scores_map.items():
+            stability[w] = float(np.var(scores)) if len(scores) > 1 else 0.0
+        
+        return {
+            "aggregated": aggregated,
+            "per_run": all_runs,
+            "tokens": tokens,
+            "class_idx": class_idx,
+            "stability": stability,
+        }
+    
+    def _aggregate_runs(
+        self,
+        all_runs: List[List[Tuple[str, float]]],
+        tokens: List[str],
+        aggregation: str = "median",
+    ) -> List[Tuple[str, float]]:
+        """Aggregate multiple runs by computing mean or median importance per word."""
+        word_scores: Dict[str, List[float]] = defaultdict(list)
+        for run in all_runs:
+            for w, s in run:
+                word_scores[w].append(s)
+        
+        aggregated = []
+        for word in tokens:
+            if word in word_scores:
+                if aggregation == "median":
+                    score = float(np.median(word_scores[word]))
+                else:
+                    score = float(np.mean(word_scores[word]))
+                aggregated.append((word, score))
+        
+        # Deduplicate and sort
+        seen = set()
+        deduped = []
+        for w, s in aggregated:
+            if w not in seen:
+                deduped.append((w, s))
+                seen.add(w)
+        
+        deduped.sort(key=lambda x: abs(x[1]), reverse=True)
+        return deduped[:self.num_features]
+    
     def explain_instance_as_html(
         self,
         text: str,
@@ -180,7 +299,22 @@ class LimeTextExplainer:
         Green = positive contribution, Red = negative contribution.
         """
         exp = self.explain_instance(text, class_idx)
-        
+        return self._to_html(exp, text)
+
+    def explain_instance_as_html_detailed(
+        self,
+        text: str,
+        class_idx: Optional[int] = None,
+        n_runs: int = 5,
+    ) -> str:
+        """
+        Return HTML explanation with aggregated results from multiple runs.
+        """
+        detail = self.explain_instance_detailed(text, class_idx, n_runs)
+        return self._to_html(detail["aggregated"], text)
+    
+    def _to_html(self, exp: List[Tuple[str, float]], text: str) -> str:
+        """Convert explanation to HTML with color-coded words."""
         tokens = self.tokenizer(text)
         word_to_score = {w: s for w, s in exp}
         
@@ -188,14 +322,20 @@ class LimeTextExplainer:
         for token in tokens:
             score = word_to_score.get(token, 0)
             if score > 0:
-                intensity = min(0.5, score * 2)
+                # Green for positive contribution
+                intensity = min(0.6, abs(score) * 2)
                 html_parts.append(
-                    f'<span style="background-color: rgba(0, 255, 0, {intensity});">{token}</span>'
+                    f'<span style="background-color: rgba(0, 200, 83, {intensity:.2f}); '
+                    f'padding: 2px 4px; border-radius: 3px;" '
+                    f'title="{score:+.4f}">{token}</span>'
                 )
             elif score < 0:
-                intensity = min(0.5, -score * 2)
+                # Red for negative contribution
+                intensity = min(0.6, abs(score) * 2)
                 html_parts.append(
-                    f'<span style="background-color: rgba(255, 0, 0, {intensity});">{token}</span>'
+                    f'<span style="background-color: rgba(244, 67, 54, {intensity:.2f}); '
+                    f'padding: 2px 4px; border-radius: 3px;" '
+                    f'title="{score:+.4f}">{token}</span>'
                 )
             else:
                 html_parts.append(f'<span>{token}</span>')

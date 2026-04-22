@@ -2,6 +2,12 @@
 
 An XAI course project implementing a stability-enhanced LIME framework inspired by **MINDFUL-LIME** to explain predictions of a **RuBERT**-based transformer model for Russian-language sentiment classification.
 
+## Live Demo
+
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://russian-sentiment-analysis-gbr56fpuxofewpxtsccl4a.streamlit.app/)
+
+**Try the interactive demo:** [https://russian-sentiment-analysis-gbr56fpuxofewpxtsccl4a.streamlit.app/](https://russian-sentiment-analysis-gbr56fpuxofewpxtsccl4a.streamlit.app/)
+
 ## Project Overview
 
 | Component | Details |
